@@ -1,0 +1,41 @@
+# --- Secrets: never commit these ---
+.env
+*.env
+!.env.example
+!**/.env.example
+*.pem
+*.key
+sa-key.json
+
+# --- Gradle / Java ---
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+*.class
+*.log
+*.jfr
+hs_err_pid*
+
+# --- Node / Angular ---
+node_modules/
+.angular/
+dist/
+npm-debug.log*
+.node/
+
+# --- IDE ---
+.idea/
+*.iml
+.vscode/
+.settings/
+.classpath
+.project
+
+# --- OS ---
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Local runtime state ---
+infra/pi/tunnel-url.txt
+backups/

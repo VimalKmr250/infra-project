@@ -1,0 +1,12 @@
+# Installed by bootstrap.sh, which substitutes __APP_DIR__ and __APP_USER__.
+[Unit]
+Description=Nightly pg_dump of the QA database
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+User=__APP_USER__
+WorkingDirectory=__APP_DIR__/infra/pi
+ExecStart=__APP_DIR__/infra/pi/backup.sh
+TimeoutStartSec=900

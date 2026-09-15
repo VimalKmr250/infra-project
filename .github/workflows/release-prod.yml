@@ -1,0 +1,163 @@
+name: Release to production
+
+# Promotes an image that already ran on QA. Nothing is rebuilt here: the tagged
+# commit's image is copied by digest, so what reaches production is byte-for-byte
+# what the Pi has been running.
+#
+# Cloud Run can only pull from Artifact Registry, not GHCR, so the promotion step
+# copies the manifest across registries. Copying preserves the digest, so the
+# guarantee above still holds.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing version tag to (re)deploy, e.g. v1.2.0'
+        required: true
+
+concurrency:
+  group: release-prod
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: read
+  id-token: write        # required for keyless Workload Identity Federation
+
+env:
+  GHCR_IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  release:
+    name: Promote and deploy
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Resolve the version and source image
+        id: src
+        run: |
+          set -euo pipefail
+          version="${{ github.event.inputs.tag || github.ref_name }}"
+          short="$(echo "${GITHUB_SHA}" | cut -c1-7)"
+          echo "version=${version}"        >> "$GITHUB_OUTPUT"
+          echo "source=${GHCR_IMAGE}:sha-${short}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify the tagged commit has a QA-tested image
+        id: verify
+        run: |
+          set -euo pipefail
+          src="${{ steps.src.outputs.source }}"
+          if ! docker buildx imagetools inspect "$src" >/dev/null 2>&1; then
+            echo "::error::No image found at ${src}."
+            echo "::error::Tags must point at a commit that was merged to main and built by CI."
+            exit 1
+          fi
+          digest="$(docker buildx imagetools inspect "$src" --format '{{json .Manifest.Digest}}' | tr -d '"')"
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+          echo "Promoting ${src} (${digest})"
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v3
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker "${{ vars.GCP_REGION }}-docker.pkg.dev" --quiet
+
+      - name: Copy the image into Artifact Registry
+        id: promote
+        run: |
+          set -euo pipefail
+          ar="${{ vars.GCP_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/${{ vars.AR_REPOSITORY }}/app"
+          src="${{ steps.src.outputs.source }}@${{ steps.verify.outputs.digest }}"
+
+          docker buildx imagetools create \
+            --tag "${ar}:${{ steps.src.outputs.version }}" \
+            --tag "${ar}:prod" \
+            "$src"
+
+          digest="$(docker buildx imagetools inspect "${ar}:${{ steps.src.outputs.version }}" \
+            --format '{{json .Manifest.Digest}}' | tr -d '"')"
+          echo "image=${ar}@${digest}" >> "$GITHUB_OUTPUT"
+
+      # Runs before the deploy, and against the SESSION pooler (port 5432).
+      # Liquibase takes an advisory lock, which the transaction pooler the app
+      # itself uses cannot hold across statements.
+      - name: Apply database migrations
+        env:
+          LIQUIBASE_URL: ${{ secrets.SUPABASE_SESSION_JDBC_URL }}
+          LIQUIBASE_USER: ${{ secrets.SUPABASE_DB_USER }}
+          LIQUIBASE_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+        run: |
+          set -euo pipefail
+          # Pinned to the version Spring Boot manages, so the changelog checksums
+          # match the ones written by QA and local runs.
+          docker run --rm \
+            -v "${{ github.workspace }}/backend/src/main/resources/db/changelog:/changelog:ro" \
+            liquibase/liquibase:5.0.3 \
+            --search-path=/changelog \
+            --changelog-file=db.changelog-master.yaml \
+            --url="${LIQUIBASE_URL}" \
+            --username="${LIQUIBASE_USER}" \
+            --password="${LIQUIBASE_PASSWORD}" \
+            update
+
+      - name: Deploy to Cloud Run
+        id: deploy
+        uses: google-github-actions/deploy-cloudrun@v3
+        with:
+          service: ${{ vars.CLOUD_RUN_SERVICE }}
+          region: ${{ vars.GCP_REGION }}
+          image: ${{ steps.promote.outputs.image }}
+          env_vars: |
+            SPRING_PROFILES_ACTIVE=prod
+          secrets: |
+            DATABASE_URL=app-database-url:latest
+            APP_JWT_SECRET=app-jwt-secret:latest
+          flags: >-
+            --min-instances=0
+            --max-instances=3
+            --cpu=1
+            --memory=512Mi
+            --concurrency=80
+            --timeout=60s
+            --allow-unauthenticated
+
+      - name: Smoke test
+        run: |
+          set -euo pipefail
+          url="${{ steps.deploy.outputs.url }}"
+          for attempt in 1 2 3 4 5; do
+            if curl -fsS --max-time 30 "${url}/actuator/health" | grep -q '"status":"UP"'; then
+              echo "Healthy at ${url}"
+              exit 0
+            fi
+            echo "Attempt ${attempt} not healthy yet; waiting (cold start)."
+            sleep 15
+          done
+          echo "::error::${url}/actuator/health never reported UP."
+          exit 1
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### Production release ${{ steps.src.outputs.version }}"
+            echo ""
+            echo "- Image digest: \`${{ steps.verify.outputs.digest }}\`"
+            echo "- Same digest QA ran: yes (copied, not rebuilt)"
+            echo "- URL: ${{ steps.deploy.outputs.url }}"
+          } >> "$GITHUB_STEP_SUMMARY"

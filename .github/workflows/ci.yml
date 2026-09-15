@@ -1,0 +1,127 @@
+name: CI
+
+# Tests run on every pull request. On a push to main the same commit is also
+# built into a multi-arch image and tagged `qa`, which is what the Raspberry Pi
+# polls for - so merging to main is the QA deploy. There is no separate deploy
+# workflow, because "deploy to QA" is exactly "publish the qa tag".
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  backend:
+    name: Backend tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - uses: gradle/actions/setup-gradle@v6
+
+      # -PskipFrontend keeps the Angular build out of the backend test task;
+      # the frontend job below covers it, in parallel.
+      - name: Unit and Testcontainers integration tests
+        run: ./gradlew :backend:test -PskipFrontend
+
+      - name: Publish test report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: backend-test-results
+          path: backend/build/reports/tests/test
+          retention-days: 7
+          if-no-files-found: ignore
+
+  frontend:
+    name: Frontend tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          # Must match gradle/libs.versions.toml. Angular rejects odd-numbered
+          # Node releases, so this cannot simply track "latest".
+          node-version: '24.21.0'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run test:ci
+      - run: npm run build
+
+  image:
+    name: Build and publish image
+    needs: [backend, frontend]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v7
+
+      # Needed only for the tiny arm64 runtime stage; the heavy build stage runs
+      # natively thanks to --platform=$BUILDPLATFORM in the Dockerfile.
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,format=short,prefix=sha-
+            type=raw,value=qa
+
+      - id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            APP_VERSION=0.0.0-${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Summary
+        run: |
+          {
+            echo "### QA image published"
+            echo ""
+            echo "- Digest: \`${{ steps.build.outputs.digest }}\`"
+            echo "- Tags: \`sha-$(echo ${{ github.sha }} | cut -c1-7)\`, \`qa\`"
+            echo ""
+            echo "The Pi picks this up within two minutes."
+          } >> "$GITHUB_STEP_SUMMARY"

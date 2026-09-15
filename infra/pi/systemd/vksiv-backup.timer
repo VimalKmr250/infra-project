@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the QA database backup nightly
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+# Still runs if the Pi was powered off at 03:30.
+Persistent=true
+Unit=vksiv-backup.service
+
+[Install]
+WantedBy=timers.target

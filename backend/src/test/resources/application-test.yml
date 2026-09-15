@@ -1,0 +1,18 @@
+spring:
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    show-sql: false
+  liquibase:
+    enabled: true
+
+app:
+  jwt:
+    secret: integration-test-signing-key-at-least-32-bytes-long
+    expiry: PT5M
+    refresh-expiry: PT30M
+
+logging:
+  level:
+    liquibase: WARN
+    org.testcontainers: WARN

@@ -1,0 +1,18 @@
+# Raspberry Pi 5. Everything runs in Docker Compose; Postgres is a sibling container.
+spring:
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:db}:5432/${POSTGRES_DB:appdb}
+    username: ${POSTGRES_USER:app}
+    password: ${POSTGRES_PASSWORD}
+    hikari:
+      maximum-pool-size: 5
+  # Migrations run at startup here: a single container, so no chance of a race.
+  liquibase:
+    enabled: true
+
+logging:
+  structured:
+    format:
+      console: ecs
+  level:
+    com.vksiv.personal.apps: DEBUG

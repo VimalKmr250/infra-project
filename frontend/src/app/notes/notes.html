@@ -1,0 +1,45 @@
+<header class="bar">
+  <div>
+    <h1>Notes</h1>
+    @if (user(); as currentUser) {
+      <p class="muted">Signed in as {{ currentUser.displayName }} ({{ currentUser.email }})</p>
+    }
+  </div>
+  <button type="button" class="secondary" (click)="signOut()">Sign out</button>
+</header>
+
+<form class="composer" [formGroup]="form" (ngSubmit)="add()" novalidate>
+  <input type="text" formControlName="title" placeholder="Title" />
+  <textarea formControlName="body" rows="3" placeholder="Write something…"></textarea>
+  <button type="submit" [disabled]="saving()">{{ saving() ? 'Saving…' : 'Add note' }}</button>
+</form>
+
+@if (error()) {
+  <p class="error" role="alert">{{ error() }}</p>
+}
+
+@if (loading()) {
+  <p class="muted">Loading…</p>
+} @else if (notes().length === 0) {
+  <p class="muted">No notes yet. Add the first one above.</p>
+} @else {
+  <ul class="notes">
+    @for (note of notes(); track note.id) {
+      <li>
+        <div class="note-head">
+          <h2>{{ note.title }}</h2>
+          <button
+            type="button"
+            class="link"
+            (click)="remove(note)"
+            [attr.aria-label]="'Delete ' + note.title"
+          >
+            Delete
+          </button>
+        </div>
+        <p>{{ note.body }}</p>
+        <time [attr.datetime]="note.createdAt">{{ note.createdAt | date: 'medium' }}</time>
+      </li>
+    }
+  </ul>
+}

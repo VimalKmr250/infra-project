@@ -1,0 +1,28 @@
+name: Keep Supabase awake
+
+# Supabase pauses free projects after roughly a week without activity, and a
+# paused project needs a manual resume in the dashboard. A low-traffic
+# production app will hit this. One cheap query a few times a week avoids it.
+#
+# This is a workaround for a free-tier limit, not a health check - if you move
+# to a paid Supabase plan or another provider, delete this workflow.
+on:
+  schedule:
+    - cron: '17 6 * * 1,4'   # Mondays and Thursdays, 06:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Touch the database
+        env:
+          PGPASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends postgresql-client
+          psql "${{ secrets.SUPABASE_SESSION_URL }}" -c 'select 1;' >/dev/null
+          echo "Supabase responded."

@@ -1,0 +1,16 @@
+.git
+.github
+.gradle
+build
+*/build
+**/node_modules
+**/.angular
+docs
+infra
+backups
+.env
+*.env
+!.env.example
+*.md
+.idea
+.vscode

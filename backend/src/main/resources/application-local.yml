@@ -1,0 +1,20 @@
+# Laptop. Postgres comes from infra/local/docker-compose.yml; the app runs natively.
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:${POSTGRES_PORT:5432}/${POSTGRES_DB:appdb}
+    username: ${POSTGRES_USER:app}
+    password: ${POSTGRES_PASSWORD:change-me-locally}
+  jpa:
+    show-sql: true
+    properties:
+      hibernate.format_sql: true
+
+logging:
+  level:
+    com.vksiv.personal.apps: DEBUG
+    org.hibernate.orm.jdbc.bind: TRACE
+
+app:
+  jwt:
+    # Local-only fallback so a fresh clone runs without any setup.
+    secret: ${APP_JWT_SECRET:local-development-only-secret-not-for-any-real-use}

@@ -1,0 +1,35 @@
+# Cloud Run + Supabase.
+#
+# Two things here are not optional:
+#
+# 1. The URL must point at Supabase's Supavisor *transaction* pooler (port 6543).
+#    Direct Supabase connections are IPv6-only, which Cloud Run cannot reach, and
+#    Cloud Run scales horizontally so every instance needs pooled connections.
+#    Transaction pooling cannot use server-side prepared statements, hence
+#    prepareThreshold=0 - without it you get "prepared statement already exists".
+#
+# 2. Liquibase is disabled. Migrations run as a discrete CI step before deploy
+#    (see .github/workflows/release-prod.yml) against the *session* pooler.
+#    Running them here would race across concurrent cold-starting instances.
+spring:
+  datasource:
+    url: ${DATABASE_URL}
+    hikari:
+      maximum-pool-size: 3
+      minimum-idle: 0
+      idle-timeout: 30000
+      max-lifetime: 570000
+      connection-timeout: 10000
+  jpa:
+    properties:
+      hibernate.jdbc.lob.non_contextual_creation: true
+  liquibase:
+    enabled: false
+
+logging:
+  structured:
+    format:
+      console: ecs
+  level:
+    root: INFO
+    com.vksiv.personal.apps: INFO

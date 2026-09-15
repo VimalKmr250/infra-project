@@ -1,0 +1,24 @@
+# Single source of truth for dependency and plugin versions.
+# Version catalogs are DSL-agnostic; this file is identical under Groovy or Kotlin DSL.
+
+[versions]
+java = "25"
+node = "24.21.0"            # LTS. Pinned so the build ignores whatever Node is on PATH.
+springBoot = "4.1.1"
+springDependencyManagement = "1.1.7"
+nodeGradle = "7.1.0"
+foojayResolver = "1.0.0"
+jjwt = "0.12.6"
+
+[libraries]
+# Versions for Spring, Liquibase, PostgreSQL, Testcontainers and JUnit are
+# supplied by the Spring Boot BOM - do not pin them here.
+jjwt-api = { module = "io.jsonwebtoken:jjwt-api", version.ref = "jjwt" }
+jjwt-impl = { module = "io.jsonwebtoken:jjwt-impl", version.ref = "jjwt" }
+jjwt-jackson = { module = "io.jsonwebtoken:jjwt-jackson", version.ref = "jjwt" }
+
+[plugins]
+spring-boot = { id = "org.springframework.boot", version.ref = "springBoot" }
+spring-dependency-management = { id = "io.spring.dependency-management", version.ref = "springDependencyManagement" }
+node-gradle = { id = "com.github.node-gradle.node", version.ref = "nodeGradle" }
+foojay-resolver = { id = "org.gradle.toolchains.foojay-resolver-convention", version.ref = "foojayResolver" }

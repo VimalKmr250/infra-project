@@ -1,0 +1,12 @@
+[Unit]
+Description=Check GHCR for a new QA image every two minutes
+
+[Timer]
+# Runs shortly after boot, then every two minutes.
+OnBootSec=90s
+OnUnitActiveSec=2min
+AccuracySec=15s
+Unit=vksiv-deploy.service
+
+[Install]
+WantedBy=timers.target

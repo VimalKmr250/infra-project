@@ -1,0 +1,13 @@
+# Installed by bootstrap.sh, which substitutes __APP_DIR__ and __APP_USER__.
+[Unit]
+Description=Pull and deploy the latest QA image
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=__APP_USER__
+WorkingDirectory=__APP_DIR__/infra/pi
+ExecStart=__APP_DIR__/infra/pi/deploy.sh
+TimeoutStartSec=600
