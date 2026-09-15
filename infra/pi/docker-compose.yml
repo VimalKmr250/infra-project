@@ -8,6 +8,11 @@
 #   quick  - free, no domain, URL changes on every restart  (default here)
 #   named  - stable hostname, requires a domain on Cloudflare and a tunnel token
 # deploy.sh picks the profile based on whether CLOUDFLARE_TUNNEL_TOKEN is set.
+#
+# Memory limits below are sized for an 8GB Pi 5 and are NOT optional. Without a
+# container limit the JVM reads the host's total RAM and sizes its heap from
+# that - on an 8GB Pi it would reserve roughly 6GB and starve Postgres.
+# On a 4GB Pi use api 768m / db 640m / MaxRAMPercentage=55.
 
 name: vksiv-apps-qa
 
@@ -16,6 +21,8 @@ services:
     image: ${IMAGE:?set IMAGE in .env, e.g. ghcr.io/OWNER/REPO:qa}
     container_name: vksiv-api
     restart: unless-stopped
+    mem_limit: 1g
+    memswap_limit: 1g
     environment:
       SPRING_PROFILES_ACTIVE: qa
       DB_HOST: db
@@ -23,6 +30,9 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-app}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
       APP_JWT_SECRET: ${APP_JWT_SECRET:?set APP_JWT_SECRET in .env}
+      # 60% of the 1g limit leaves headroom for metaspace, thread stacks and
+      # direct buffers, which live outside the heap and are easy to forget.
+      JAVA_TOOL_OPTIONS: "-XX:MaxRAMPercentage=60 -XX:+UseSerialGC"
     ports:
       # Bound to loopback: reachable by cloudflared and from the Pi itself,
       # but not from the rest of the LAN.
@@ -46,10 +56,28 @@ services:
     image: postgres:17-alpine
     container_name: vksiv-db
     restart: unless-stopped
+    mem_limit: 1g
+    memswap_limit: 1g
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-appdb}
       POSTGRES_USER: ${POSTGRES_USER:-app}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    # Postgres ships with defaults tuned for a much smaller machine than it
+    # assumes. max_connections is 20 because the app's pool maxes out at 5.
+    command:
+      - postgres
+      - -c
+      - shared_buffers=256MB
+      - -c
+      - effective_cache_size=768MB
+      - -c
+      - work_mem=8MB
+      - -c
+      - maintenance_work_mem=64MB
+      - -c
+      - max_connections=20
+      - -c
+      - random_page_cost=1.1
     volumes:
       - db-data:/var/lib/postgresql/data
       - ./backups:/backups
@@ -69,6 +97,7 @@ services:
     container_name: vksiv-tunnel
     profiles: ["quick"]
     restart: unless-stopped
+    mem_limit: 128m
     command: tunnel --no-autoupdate --url http://api:8080
     depends_on:
       - api
@@ -83,6 +112,7 @@ services:
     container_name: vksiv-tunnel
     profiles: ["named"]
     restart: unless-stopped
+    mem_limit: 128m
     command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
     depends_on:
       - api

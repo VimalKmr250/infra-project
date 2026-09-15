@@ -4,6 +4,39 @@ The Pi runs the QA environment. It never accepts an inbound connection: it pulls
 its image from GHCR and reaches the internet outbound through a Cloudflare
 tunnel. No router port is forwarded, and no firewall rule is needed.
 
+## Hardware
+
+| Part | Choice | Why |
+|---|---|---|
+| Board | **Raspberry Pi 5, 8GB** | 4GB runs this stack but leaves no room; 16GB buys nothing here. The capped containers use ~2.1GB, the rest becomes page cache Postgres actually benefits from. |
+| Storage | **NVMe SSD, 256GB**, via the official M.2 HAT+ or an Argon NEO 5 M.2 case | Do not run Postgres on a microSD. Sustained small writes wear it out and it is roughly an order of magnitude slower. |
+| Cooling | **Official Active Cooler** (or the case's built-in fan) | A JVM under sustained load will thermal-throttle a passively cooled Pi 5. This is a 24/7 machine. |
+| Power | **Official 27W USB-C PD supply (5.1V/5A)** | Anything less and the Pi limits peripheral power, which an NVMe drive will notice. Third-party 15W supplies cause boot loops under load. |
+| Network | **Wired Ethernet** | Not strictly required - cloudflared only makes outbound connections - but WiFi dropouts are the most common cause of a QA box going quiet. |
+
+Budget roughly $130-170 all in. If you want one box rather than parts, an
+Argon NEO 5 M.2 NVMe case bundles the NVMe adapter and cooling.
+
+## Operating system
+
+**Raspberry Pi OS Lite (64-bit)** - Debian Trixie. Lite because there is no
+reason to run a desktop, and **64-bit is mandatory**: the image is arm64 only.
+
+Flash with Raspberry Pi Imager and use its settings dialog (the gear icon)
+before writing - it saves a round of manual configuration:
+
+- hostname: `vksiv-qa`
+- enable SSH, **public-key only** - paste your key rather than setting a password
+- username: your own, not `pi`
+- locale and WiFi only if you are not using Ethernet
+
+To boot from NVMe, write the image to the SSD directly over a USB-NVMe
+enclosure, then tell the bootloader to prefer it:
+
+```bash
+sudo raspi-config    # Advanced Options -> Boot Order -> NVMe/USB Boot
+```
+
 ## What runs there
 
 | Container | Purpose |
@@ -88,6 +121,22 @@ journalctl -u vksiv-deploy.service -f    # what the auto-deploy is doing
 ./deploy.sh                              # force a deploy now
 systemctl list-timers 'vksiv-*'          # when things next run
 ```
+
+## Sizing
+
+The compose file caps every container, and those limits are load-bearing.
+Without a container memory limit the JVM reads the *host's* total RAM and
+sizes its heap from that - on an 8GB Pi it would reserve around 6GB and
+starve Postgres.
+
+| Container | Limit | Heap |
+|---|---|---|
+| `api` | 1g | ~614MB (60% of the limit) |
+| `db` | 1g | `shared_buffers=256MB` |
+| `cloudflared` | 128m | - |
+
+On a 4GB Pi, drop to api `768m` with `MaxRAMPercentage=55`, and db `640m`
+with `shared_buffers=192MB`.
 
 ## Backups
 
