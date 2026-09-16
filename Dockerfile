@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-# Built for both linux/amd64 (Cloud Run) and linux/arm64 (Raspberry Pi 5).
+# Built for both linux/amd64 (Cloud Run) and linux/arm64 (Raspberry Pi 4/5).
 
 # ---------------------------------------------------------------- build ------
 # Pinned to the builder's own architecture via $BUILDPLATFORM. Without it buildx

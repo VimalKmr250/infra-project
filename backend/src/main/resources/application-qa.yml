@@ -1,4 +1,4 @@
-# Raspberry Pi 5. Everything runs in Docker Compose; Postgres is a sibling container.
+# Raspberry Pi 4. Everything runs in Docker Compose; Postgres is a sibling container.
 spring:
   datasource:
     url: jdbc:postgresql://${DB_HOST:db}:5432/${POSTGRES_DB:appdb}

@@ -1,4 +1,4 @@
-# QA environment - Raspberry Pi 5 (linux/arm64).
+# QA environment - Raspberry Pi 4 Model B, 4GB, 64-bit Raspberry Pi OS (arm64).
 #
 # The Pi never accepts inbound connections. It pulls its image from GHCR and
 # reaches the internet outbound through a Cloudflare tunnel, so no router port
@@ -9,10 +9,14 @@
 #   named  - stable hostname, requires a domain on Cloudflare and a tunnel token
 # deploy.sh picks the profile based on whether CLOUDFLARE_TUNNEL_TOKEN is set.
 #
-# Memory limits below are sized for an 8GB Pi 5 and are NOT optional. Without a
+# Memory limits are sized for a 4GB board and are NOT optional. Without a
 # container limit the JVM reads the host's total RAM and sizes its heap from
-# that - on an 8GB Pi it would reserve roughly 6GB and starve Postgres.
-# On a 4GB Pi use api 768m / db 640m / MaxRAMPercentage=55.
+# that, which on this board means it would try to reserve ~3GB and leave nothing
+# for Postgres. Capped totals here are ~1.5GB, leaving the rest for the OS,
+# Docker, and page cache.
+#
+# On an 8GB board you can raise api to 1g / MaxRAMPercentage=60 and db to 1g /
+# shared_buffers=256MB.
 
 name: vksiv-apps-qa
 
@@ -21,8 +25,8 @@ services:
     image: ${IMAGE:?set IMAGE in .env, e.g. ghcr.io/OWNER/REPO:qa}
     container_name: vksiv-api
     restart: unless-stopped
-    mem_limit: 1g
-    memswap_limit: 1g
+    mem_limit: 768m
+    memswap_limit: 768m
     environment:
       SPRING_PROFILES_ACTIVE: qa
       DB_HOST: db
@@ -30,9 +34,9 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-app}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
       APP_JWT_SECRET: ${APP_JWT_SECRET:?set APP_JWT_SECRET in .env}
-      # 60% of the 1g limit leaves headroom for metaspace, thread stacks and
-      # direct buffers, which live outside the heap and are easy to forget.
-      JAVA_TOOL_OPTIONS: "-XX:MaxRAMPercentage=60 -XX:+UseSerialGC"
+      # 55% of 768m is ~420MB of heap. The remainder is not spare - metaspace,
+      # thread stacks and direct buffers all live outside the heap.
+      JAVA_TOOL_OPTIONS: "-XX:MaxRAMPercentage=55 -XX:+UseSerialGC"
     ports:
       # Bound to loopback: reachable by cloudflared and from the Pi itself,
       # but not from the rest of the LAN.
@@ -45,7 +49,9 @@ services:
       interval: 30s
       timeout: 5s
       retries: 5
-      start_period: 90s
+      # A Cortex-A72 booting Spring Boot off a microSD card is slow. 90s is
+      # enough on a Pi 5 with NVMe and not enough here.
+      start_period: 180s
     logging:
       driver: json-file
       options:
@@ -56,28 +62,43 @@ services:
     image: postgres:17-alpine
     container_name: vksiv-db
     restart: unless-stopped
-    mem_limit: 1g
-    memswap_limit: 1g
+    mem_limit: 640m
+    memswap_limit: 640m
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-appdb}
       POSTGRES_USER: ${POSTGRES_USER:-app}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
-    # Postgres ships with defaults tuned for a much smaller machine than it
-    # assumes. max_connections is 20 because the app's pool maxes out at 5.
+    # Tuned for 4GB of RAM on a microSD card. The second half of this list is
+    # about writing less, because SD cards wear out by being written to:
+    #   synchronous_commit=off  - the big one. Commits stop waiting on fsync.
+    #                             A crash can lose the last fraction of a second
+    #                             of transactions, which is the right trade for
+    #                             QA and the wrong one for production.
+    #   wal_compression         - fewer bytes of WAL per write.
+    #   checkpoint_timeout      - checkpoints every 15 min instead of every 5.
+    # max_connections is 20 because the application pool maxes out at 5.
     command:
       - postgres
       - -c
-      - shared_buffers=256MB
+      - shared_buffers=192MB
       - -c
-      - effective_cache_size=768MB
+      - effective_cache_size=512MB
       - -c
-      - work_mem=8MB
+      - work_mem=4MB
       - -c
-      - maintenance_work_mem=64MB
+      - maintenance_work_mem=32MB
       - -c
       - max_connections=20
       - -c
-      - random_page_cost=1.1
+      - random_page_cost=2.0
+      - -c
+      - synchronous_commit=off
+      - -c
+      - wal_compression=on
+      - -c
+      - checkpoint_timeout=15min
+      - -c
+      - max_wal_size=512MB
     volumes:
       - db-data:/var/lib/postgresql/data
       - ./backups:/backups

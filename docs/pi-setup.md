@@ -1,26 +1,78 @@
-# QA environment - Raspberry Pi 5
+# QA environment - Raspberry Pi 4 Model B (4GB)
 
 The Pi runs the QA environment. It never accepts an inbound connection: it pulls
 its image from GHCR and reaches the internet outbound through a Cloudflare
 tunnel. No router port is forwarded, and no firewall rule is needed.
 
+A Pi 4 runs this stack fine. It is slower than a Pi 5 - a Cortex-A72 at 1.5GHz
+against an A76 at 2.4GHz - so expect the application to take a couple of minutes
+to become healthy after a deploy rather than under a minute. Nothing else about
+the pipeline changes: the Pi 4 is arm64, so it runs exactly the same image.
+
 ## Hardware
 
-| Part | Choice | Why |
+| Part | Choice | Note |
 |---|---|---|
-| Board | **Raspberry Pi 5, 8GB** | 4GB runs this stack but leaves no room; 16GB buys nothing here. The capped containers use ~2.1GB, the rest becomes page cache Postgres actually benefits from. |
-| Storage | **NVMe SSD, 256GB**, via the official M.2 HAT+ or an Argon NEO 5 M.2 case | Do not run Postgres on a microSD. Sustained small writes wear it out and it is roughly an order of magnitude slower. |
-| Cooling | **Official Active Cooler** (or the case's built-in fan) | A JVM under sustained load will thermal-throttle a passively cooled Pi 5. This is a 24/7 machine. |
-| Power | **Official 27W USB-C PD supply (5.1V/5A)** | Anything less and the Pi limits peripheral power, which an NVMe drive will notice. Third-party 15W supplies cause boot loops under load. |
-| Network | **Wired Ethernet** | Not strictly required - cloudflared only makes outbound connections - but WiFi dropouts are the most common cause of a QA box going quiet. |
+| Board | Pi 4 Model B, 4GB | The container limits below are sized for it. |
+| Power | **Official 15W USB-C supply (5.1V/3A)** | Under-powering a Pi 4 causes silent throttling and filesystem corruption. If `vcgencmd get_throttled` returns anything but `0x0`, suspect the supply before anything else. |
+| Cooling | **Heatsink and fan**, e.g. Argon ONE or a Flirc case | A bare Pi 4 throttles at 80C and this box runs a JVM continuously. Passive-only is not enough. |
+| Storage | microSD - **high-endurance card** | See below. |
+| Network | Wired Ethernet | cloudflared is outbound-only so WiFi works, but WiFi dropouts are the usual reason a QA box goes quiet. |
 
-Budget roughly $130-170 all in. If you want one box rather than parts, an
-Argon NEO 5 M.2 NVMe case bundles the NVMe adapter and cooling.
+### About the microSD card
+
+This is the weak point of the setup and worth being honest about: a database
+writes constantly, and SD cards wear out by being written to. Expect a consumer
+card running Postgres to degrade over months rather than years.
+
+Two mitigations are already in place for you:
+
+- **Postgres is tuned to write less.** `infra/pi/docker-compose.yml` sets
+  `synchronous_commit=off`, `wal_compression=on` and a 15-minute checkpoint
+  interval. The first is the significant one - commits stop waiting on fsync.
+  A crash can lose the last fraction of a second of transactions, which is the
+  right trade for QA and would be the wrong one for production.
+- **Docker log rotation is capped** at 10MB x 3 per container, so logs cannot
+  quietly grind the card down.
+
+Worth doing yourself:
+
+- Buy a **high-endurance** card (SanDisk Max Endurance, Samsung PRO Endurance).
+  They are built for dashcams writing continuously and cost little more than a
+  normal card.
+- Turn off swap. With 4GB and capped containers you do not need it, and swap on
+  an SD card is both slow and destructive:
+
+```bash
+sudo dphys-swapfile swapoff && sudo systemctl disable --now dphys-swapfile
+```
+
+- Cap the systemd journal so it cannot grow without bound:
+
+```bash
+sudo mkdir -p /etc/systemd/journald.conf.d
+```
+
+```bash
+printf '[Journal]\nSystemMaxUse=100M\n' | sudo tee /etc/systemd/journald.conf.d/size.conf && sudo systemctl restart systemd-journald
+```
+
+- Rely on the nightly `pg_dump` backups below and copy them off the Pi. Assume
+  the card will fail eventually; that assumption is what makes it a non-event.
+
+If you later want a real fix rather than a mitigation, a SATA SSD in a USB 3.0
+enclosure on one of the blue ports is a large improvement, and a Pi 4 can boot
+from it directly with current firmware.
 
 ## Operating system
 
-**Raspberry Pi OS Lite (64-bit)** - Debian Trixie. Lite because there is no
-reason to run a desktop, and **64-bit is mandatory**: the image is arm64 only.
+**Raspberry Pi OS Lite (64-bit)** - Debian Trixie. Two things matter:
+
+- **Lite**, because there is no reason to run a desktop on a headless server.
+- **64-bit is mandatory.** A Pi 4 will happily run the 32-bit image, and many
+  existing Pi 4 installs are 32-bit, but this project publishes an arm64 image
+  only - on a 32-bit OS the container will not start. `bootstrap.sh` checks this
+  and warns. Confirm with `uname -m`, which must print `aarch64`, not `armv7l`.
 
 Flash with Raspberry Pi Imager and use its settings dialog (the gear icon)
 before writing - it saves a round of manual configuration:
@@ -28,45 +80,48 @@ before writing - it saves a round of manual configuration:
 - hostname: `vksiv-qa`
 - enable SSH, **public-key only** - paste your key rather than setting a password
 - username: your own, not `pi`
-- locale and WiFi only if you are not using Ethernet
-
-To boot from NVMe, write the image to the SSD directly over a USB-NVMe
-enclosure, then tell the bootloader to prefer it:
-
-```bash
-sudo raspi-config    # Advanced Options -> Boot Order -> NVMe/USB Boot
-```
+- locale, and WiFi only if you are not using Ethernet
 
 ## What runs there
 
-| Container | Purpose |
-|---|---|
-| `vksiv-api` | The application image, `qa` tag, `arm64` |
-| `vksiv-db` | PostgreSQL 17, data on the Pi's disk |
-| `vksiv-tunnel` | `cloudflared`, exposes the API over HTTPS |
+| Container | Limit | Purpose |
+|---|---|---|
+| `vksiv-api` | 768m | The application image, `qa` tag, arm64 |
+| `vksiv-db` | 640m | PostgreSQL 17, data on the card |
+| `vksiv-tunnel` | 128m | `cloudflared`, exposes the API over HTTPS |
+
+Roughly 1.5GB capped, leaving the rest of the 4GB for the OS, Docker and page
+cache. The limits are load-bearing: without a container limit the JVM reads the
+*host's* total RAM and sizes its heap from that, so it would try to reserve
+around 3GB and leave nothing for Postgres.
 
 A systemd timer runs `deploy.sh` every two minutes. It pulls the `qa` tag and
 restarts the stack only when the digest actually changed, so a merge to `main`
-is live on the Pi within about two minutes with no push access to the Pi at all.
+is live on the Pi within a few minutes, with no push access to the Pi at all.
 
 ## One-time setup
 
-Use 64-bit Raspberry Pi OS. Boot from SSD rather than an SD card if you can -
-Postgres on an SD card wears it out and is slow.
-
 ```bash
 sudo apt update && sudo apt full-upgrade -y
-git clone https://github.com/OWNER/REPO.git ~/vksiv-apps
-cd ~/vksiv-apps/infra/pi
-cp .env.example .env
-nano .env
 ```
 
-Fill in `.env` before going further:
+```bash
+git clone https://github.com/OWNER/REPO.git ~/vksiv-apps
+```
+
+```bash
+cd ~/vksiv-apps/infra/pi && cp .env.example .env
+```
+
+Generate the two secrets, then paste them into `.env`:
+
+```bash
+echo "POSTGRES_PASSWORD=$(openssl rand -base64 24)"; echo "APP_JWT_SECRET=$(openssl rand -base64 48)"
+```
+
+Also fill in:
 
 - `IMAGE` - `ghcr.io/OWNER/REPO:qa`, all lowercase
-- `POSTGRES_PASSWORD` - `openssl rand -base64 24`
-- `APP_JWT_SECRET` - `openssl rand -base64 48`
 - `GHCR_USER` / `GHCR_TOKEN` - a GitHub PAT with `read:packages`, because GHCR
   packages are private by default. Leave both blank only if you deliberately
   made the package public.
@@ -78,11 +133,14 @@ Then:
 ./bootstrap.sh
 ```
 
-It installs Docker if missing, logs in to GHCR, installs and enables the
-systemd timers, and runs the first deploy. It is safe to re-run.
+It installs Docker if missing, logs in to GHCR, installs and enables the systemd
+timers, and runs the first deploy. It is safe to re-run.
 
-If it just installed Docker, log out and back in before re-running, so your
-user picks up the `docker` group.
+If it just installed Docker, log out and back in before re-running, so your user
+picks up the `docker` group.
+
+The first deploy pulls roughly 180MB and then starts a JVM from an SD card, so
+give it a few minutes before assuming something has gone wrong.
 
 ## Reaching it
 
@@ -113,30 +171,24 @@ skip cloudflared entirely; QA is then reachable only from your own devices.
 ## Day-to-day
 
 ```bash
-cd ~/vksiv-apps/infra/pi
-
-docker compose ps                        # what is running
-docker compose logs -f api               # application logs
-journalctl -u vksiv-deploy.service -f    # what the auto-deploy is doing
-./deploy.sh                              # force a deploy now
-systemctl list-timers 'vksiv-*'          # when things next run
+cd ~/vksiv-apps/infra/pi && docker compose ps
 ```
 
-## Sizing
+```bash
+docker compose logs -f api
+```
 
-The compose file caps every container, and those limits are load-bearing.
-Without a container memory limit the JVM reads the *host's* total RAM and
-sizes its heap from that - on an 8GB Pi it would reserve around 6GB and
-starve Postgres.
+```bash
+journalctl -u vksiv-deploy.service -f
+```
 
-| Container | Limit | Heap |
-|---|---|---|
-| `api` | 1g | ~614MB (60% of the limit) |
-| `db` | 1g | `shared_buffers=256MB` |
-| `cloudflared` | 128m | - |
+```bash
+systemctl list-timers 'vksiv-*'
+```
 
-On a 4GB Pi, drop to api `768m` with `MaxRAMPercentage=55`, and db `640m`
-with `shared_buffers=192MB`.
+`vcgencmd get_throttled` should return `0x0`. Anything else means the Pi has
+been throttled by heat or an inadequate power supply, which on a Pi 4 is the
+most common cause of unexplained slowness or corruption.
 
 ## Backups
 
@@ -146,9 +198,9 @@ with `shared_buffers=192MB`.
 Restore:
 
 ```bash
-gunzip -c backups/appdb-20260101-033000.sql.gz \
-  | docker compose exec -T db psql -U app -d appdb
+gunzip -c backups/appdb-20260101-033000.sql.gz | docker compose exec -T db psql -U app -d appdb
 ```
 
-These backups live only on the Pi. If the QA data matters to you, copy them off
-periodically - QA data is normally reproducible, so this is deliberately simple.
+These backups live on the same card as the database, which is exactly the thing
+expected to fail. Copy them off the Pi periodically - a cron job doing `scp` to
+your laptop is enough.

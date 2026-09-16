@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# One-time setup for the Raspberry Pi 5 QA environment.
+# One-time setup for the Raspberry Pi QA environment (Pi 4 Model B or newer).
 #
 #   git clone <repo> ~/vksiv-apps
 #   cd ~/vksiv-apps/infra/pi
@@ -17,7 +17,8 @@ APP_USER="${SUDO_USER:-$USER}"
 say() { printf '\n==> %s\n' "$*"; }
 
 if [[ "$(uname -m)" != "aarch64" ]]; then
-    echo "Warning: expected aarch64 (Pi 5 running 64-bit Raspberry Pi OS); found $(uname -m)." >&2
+    echo "Warning: expected aarch64 - a Pi running the 64-BIT Raspberry Pi OS. Found $(uname -m)." >&2
+    echo "A 32-bit install (armv7l) is common on the Pi 4 and cannot run this arm64 image." >&2
 fi
 
 # ---------------------------------------------------------------- docker -----

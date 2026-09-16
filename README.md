@@ -5,7 +5,7 @@ path that runs the same image in all of them.
 
 | | Local | QA | Production |
 |---|---|---|---|
-| Runs on | Your laptop | Raspberry Pi 5 | Google Cloud Run |
+| Runs on | Your laptop | Raspberry Pi 4 | Google Cloud Run |
 | Arch | amd64 | arm64 | amd64 |
 | Database | Postgres container | Postgres container | Supabase |
 | Reached via | `localhost:4200` | Cloudflare Tunnel | `*.run.app` |
