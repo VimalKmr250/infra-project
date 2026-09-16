@@ -73,6 +73,12 @@ unexplained slowness and card corruption.
 sudo apt update && sudo apt full-upgrade -y
 ```
 
+Raspberry Pi OS Lite ships without git, so install it now - step 4 needs it:
+
+```bash
+sudo apt install -y git
+```
+
 Check what swap exists. Current Pi OS Lite images often have none at all, and
 `dphys-swapfile` is no longer installed by default - if you get
 `command not found`, that is why.
