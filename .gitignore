@@ -39,3 +39,6 @@ desktop.ini
 # --- Local runtime state ---
 infra/pi/tunnel-url.txt
 backups/
+
+# Local editor/MCP tooling config, specific to one machine.
+.mcp.json
