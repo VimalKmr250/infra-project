@@ -73,11 +73,25 @@ unexplained slowness and card corruption.
 sudo apt update && sudo apt full-upgrade -y
 ```
 
-Turn off swap. With 4GB and capped containers you do not need it, and swap on an
-SD card is both slow and destructive:
+Check what swap exists. Current Pi OS Lite images often have none at all, and
+`dphys-swapfile` is no longer installed by default - if you get
+`command not found`, that is why.
 
 ```bash
-sudo dphys-swapfile swapoff && sudo systemctl disable --now dphys-swapfile
+swapon --show
+```
+
+Act on what it prints:
+
+- **Nothing at all** - there is no swap. Nothing to do; move on.
+- **`/dev/zram0`** - swap lives in compressed RAM, not on the card. **Leave it
+  alone.** It costs the card no writes at all and is genuinely useful on a 4GB
+  board.
+- **A file path such as `/var/swap`** - that is a real file on the SD card, and
+  it is both slow and destructive. Turn it off:
+
+```bash
+sudo swapoff -a && sudo systemctl disable --now dphys-swapfile
 ```
 
 Cap the systemd journal so it cannot grow without bound:
@@ -265,8 +279,8 @@ Two mitigations are already configured for you:
 - **Docker log rotation is capped** at 10MB x 3 per container, so logs cannot
   quietly grind the card down.
 
-Steps 3 and 5 above cover the rest: no swap, a capped journal, and nightly
-backups you copy off the box.
+Step 3 covers the rest: no disk-backed swap, and a capped journal. Note that
+zram swap is fine to keep - it is compressed RAM and never touches the card.
 
 If this becomes a nuisance, the real fix is a SATA SSD in a USB 3.0 enclosure on
 one of the blue ports. A Pi 4 can boot from it directly with current firmware,
