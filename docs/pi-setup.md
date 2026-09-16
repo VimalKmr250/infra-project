@@ -1,53 +1,86 @@
 # QA environment - Raspberry Pi 4 Model B (4GB)
 
-The Pi runs the QA environment. It never accepts an inbound connection: it pulls
-its image from GHCR and reaches the internet outbound through a Cloudflare
-tunnel. No router port is forwarded, and no firewall rule is needed.
+Every merge to `main` lands here within a few minutes. The Pi never accepts an
+inbound connection: it pulls its image from GHCR and reaches the outside world
+through an outbound Cloudflare tunnel, so no router port is forwarded and no
+firewall rule is needed.
 
-A Pi 4 runs this stack fine. It is slower than a Pi 5 - a Cortex-A72 at 1.5GHz
-against an A76 at 2.4GHz - so expect the application to take a couple of minutes
-to become healthy after a deploy rather than under a minute. Nothing else about
-the pipeline changes: the Pi 4 is arm64, so it runs exactly the same image.
+---
 
-## Hardware
+# Initial setup
 
-| Part | Choice | Note |
-|---|---|---|
-| Board | Pi 4 Model B, 4GB | The container limits below are sized for it. |
-| Power | **Official 15W USB-C supply (5.1V/3A)** | Under-powering a Pi 4 causes silent throttling and filesystem corruption. If `vcgencmd get_throttled` returns anything but `0x0`, suspect the supply before anything else. |
-| Cooling | **Heatsink and fan**, e.g. Argon ONE or a Flirc case | A bare Pi 4 throttles at 80C and this box runs a JVM continuously. Passive-only is not enough. |
-| Storage | microSD - **high-endurance card** | See below. |
-| Network | Wired Ethernet | cloudflared is outbound-only so WiFi works, but WiFi dropouts are the usual reason a QA box goes quiet. |
+Work through these in order. Budget about an hour, most of it spent waiting on
+downloads.
 
-### About the microSD card
+## What you need
 
-This is the weak point of the setup and worth being honest about: a database
-writes constantly, and SD cards wear out by being written to. Expect a consumer
-card running Postgres to degrade over months rather than years.
+| | |
+|---|---|
+| Raspberry Pi 4 Model B, 4GB | The container limits are sized for it |
+| microSD card, 32GB+ | Buy **high-endurance** (SanDisk Max Endurance, Samsung PRO Endurance) - a database writes constantly |
+| Official 15W USB-C supply (5.1V/3A) | Under-powering a Pi 4 causes silent throttling and filesystem corruption |
+| Heatsink and fan | Argon ONE or a Flirc case. This box runs a JVM continuously |
+| Ethernet cable | WiFi works, but dropouts are the usual reason a QA box goes quiet |
 
-Two mitigations are already in place for you:
+You also need a **GitHub personal access token** with the `read:packages` scope.
+GHCR packages are private by default, and the Pi needs it to pull the image.
+Create one at GitHub → Settings → Developer settings → Personal access tokens.
 
-- **Postgres is tuned to write less.** `infra/pi/docker-compose.yml` sets
-  `synchronous_commit=off`, `wal_compression=on` and a 15-minute checkpoint
-  interval. The first is the significant one - commits stop waiting on fsync.
-  A crash can lose the last fraction of a second of transactions, which is the
-  right trade for QA and would be the wrong one for production.
-- **Docker log rotation is capped** at 10MB x 3 per container, so logs cannot
-  quietly grind the card down.
+## 1. Flash the operating system
 
-Worth doing yourself:
+Use **Raspberry Pi OS Lite (64-bit)**. Lite because there is no reason to run a
+desktop on a headless server, and 64-bit because this project publishes an
+**arm64 image only** - a 32-bit install cannot run it.
 
-- Buy a **high-endurance** card (SanDisk Max Endurance, Samsung PRO Endurance).
-  They are built for dashcams writing continuously and cost little more than a
-  normal card.
-- Turn off swap. With 4GB and capped containers you do not need it, and swap on
-  an SD card is both slow and destructive:
+In Raspberry Pi Imager, open the settings dialog (the gear icon) *before*
+writing. It saves a round of manual configuration:
+
+- hostname: `vksiv-qa`
+- enable SSH, **public-key only** - paste your key rather than setting a password
+- username: your own, not `pi`
+- locale, and WiFi only if you are not using Ethernet
+
+## 2. First boot, and confirm the architecture
+
+Insert the card, connect Ethernet, and power on. Then SSH in:
+
+```bash
+ssh <your-user>@vksiv-qa.local
+```
+
+Confirm the OS is 64-bit. This must print `aarch64`:
+
+```bash
+uname -m
+```
+
+If it prints `armv7l`, you have the 32-bit OS. Stop here and reflash with the
+64-bit image - nothing later in this guide will work otherwise.
+
+Confirm power and cooling are adequate. This must print `throttled=0x0`:
+
+```bash
+vcgencmd get_throttled
+```
+
+Anything else means the Pi is being throttled by heat or an inadequate power
+supply. Fix that before continuing; on a Pi 4 it is the most common cause of
+unexplained slowness and card corruption.
+
+## 3. Update and prepare the system
+
+```bash
+sudo apt update && sudo apt full-upgrade -y
+```
+
+Turn off swap. With 4GB and capped containers you do not need it, and swap on an
+SD card is both slow and destructive:
 
 ```bash
 sudo dphys-swapfile swapoff && sudo systemctl disable --now dphys-swapfile
 ```
 
-- Cap the systemd journal so it cannot grow without bound:
+Cap the systemd journal so it cannot grow without bound:
 
 ```bash
 sudo mkdir -p /etc/systemd/journald.conf.d
@@ -57,32 +90,100 @@ sudo mkdir -p /etc/systemd/journald.conf.d
 printf '[Journal]\nSystemMaxUse=100M\n' | sudo tee /etc/systemd/journald.conf.d/size.conf && sudo systemctl restart systemd-journald
 ```
 
-- Rely on the nightly `pg_dump` backups below and copy them off the Pi. Assume
-  the card will fail eventually; that assumption is what makes it a non-event.
+## 4. Clone the repository
 
-If you later want a real fix rather than a mitigation, a SATA SSD in a USB 3.0
-enclosure on one of the blue ports is a large improvement, and a Pi 4 can boot
-from it directly with current firmware.
+```bash
+git clone https://github.com/OWNER/REPO.git ~/vksiv-apps
+```
 
-## Operating system
+```bash
+cd ~/vksiv-apps/infra/pi && cp .env.example .env
+```
 
-**Raspberry Pi OS Lite (64-bit)** - Debian Trixie. Two things matter:
+## 5. Fill in the secrets
 
-- **Lite**, because there is no reason to run a desktop on a headless server.
-- **64-bit is mandatory.** A Pi 4 will happily run the 32-bit image, and many
-  existing Pi 4 installs are 32-bit, but this project publishes an arm64 image
-  only - on a 32-bit OS the container will not start. `bootstrap.sh` checks this
-  and warns. Confirm with `uname -m`, which must print `aarch64`, not `armv7l`.
+Generate the two secrets and copy the output:
 
-Flash with Raspberry Pi Imager and use its settings dialog (the gear icon)
-before writing - it saves a round of manual configuration:
+```bash
+echo "POSTGRES_PASSWORD=$(openssl rand -base64 24)"; echo "APP_JWT_SECRET=$(openssl rand -base64 48)"
+```
 
-- hostname: `vksiv-qa`
-- enable SSH, **public-key only** - paste your key rather than setting a password
-- username: your own, not `pi`
-- locale, and WiFi only if you are not using Ethernet
+Open `.env` and set:
 
-## What runs there
+| Variable | Value |
+|---|---|
+| `IMAGE` | `ghcr.io/OWNER/REPO:qa` - all lowercase |
+| `POSTGRES_PASSWORD` | from the command above |
+| `APP_JWT_SECRET` | from the command above |
+| `GHCR_USER` | your GitHub username |
+| `GHCR_TOKEN` | the `read:packages` token |
+| `CLOUDFLARE_TUNNEL_TOKEN` | leave **blank** for now |
+
+```bash
+nano .env && chmod 600 .env
+```
+
+## 6. Run the bootstrap
+
+```bash
+./bootstrap.sh
+```
+
+It installs Docker if missing, logs in to GHCR, installs and enables both
+systemd timers, and runs the first deploy. It is safe to re-run at any time.
+
+**If it just installed Docker, log out and back in, then run it again** - your
+user needs to pick up the `docker` group first.
+
+The first deploy pulls roughly 180MB and then starts a JVM from an SD card. Give
+it a few minutes before assuming something has gone wrong. Watch it with:
+
+```bash
+docker compose logs -f api
+```
+
+## 7. Find the QA URL
+
+With `CLOUDFLARE_TUNNEL_TOKEN` blank you get a free *quick tunnel*.
+`deploy.sh` writes the current address to a file:
+
+```bash
+cat ~/vksiv-apps/infra/pi/tunnel-url.txt
+```
+
+Open it. You should get the Angular UI, and be able to register an account and
+create a note.
+
+This URL **changes every time the tunnel container restarts**, including on
+every deploy. That is the free tier's limitation, not a misconfiguration - see
+[Reaching it from outside](#reaching-it-from-outside) for the fix.
+
+## 8. Confirm it survives a reboot
+
+The point of this box is that you never touch it again, so prove that now:
+
+```bash
+sudo reboot
+```
+
+Wait a minute, SSH back in, and check everything came back on its own:
+
+```bash
+cd ~/vksiv-apps/infra/pi && docker compose ps
+```
+
+```bash
+systemctl list-timers 'vksiv-*'
+```
+
+Both timers should be listed and all containers up. Setup is done - from here,
+merging to `main` is all it takes to deploy.
+
+---
+
+# Reference
+
+## What runs on the Pi
 
 | Container | Limit | Purpose |
 |---|---|---|
@@ -97,76 +198,24 @@ around 3GB and leave nothing for Postgres.
 
 A systemd timer runs `deploy.sh` every two minutes. It pulls the `qa` tag and
 restarts the stack only when the digest actually changed, so a merge to `main`
-is live on the Pi within a few minutes, with no push access to the Pi at all.
+is live within a few minutes with no push access to the Pi at all.
 
-## One-time setup
+## Reaching it from outside
 
-```bash
-sudo apt update && sudo apt full-upgrade -y
-```
+**Quick tunnel (default, no domain).** A free `*.trycloudflare.com` address that
+changes whenever the tunnel restarts. Fine for ad-hoc testing, poor as a stable
+QA address.
 
-```bash
-git clone https://github.com/OWNER/REPO.git ~/vksiv-apps
-```
+**Named tunnel (recommended).** Needs a domain on Cloudflare. Create a tunnel in
+Zero Trust → Networks → Tunnels, point a hostname such as `qa.example.com` at
+`http://api:8080`, and put the token in `.env` as `CLOUDFLARE_TUNNEL_TOKEN`.
+`deploy.sh` detects it and switches profiles automatically - the URL then never
+changes. A domain costs roughly $10/year and is the single best improvement you
+can make to this environment. You can also put Cloudflare Access in front of the
+hostname so only your own account can load QA.
 
-```bash
-cd ~/vksiv-apps/infra/pi && cp .env.example .env
-```
-
-Generate the two secrets, then paste them into `.env`:
-
-```bash
-echo "POSTGRES_PASSWORD=$(openssl rand -base64 24)"; echo "APP_JWT_SECRET=$(openssl rand -base64 48)"
-```
-
-Also fill in:
-
-- `IMAGE` - `ghcr.io/OWNER/REPO:qa`, all lowercase
-- `GHCR_USER` / `GHCR_TOKEN` - a GitHub PAT with `read:packages`, because GHCR
-  packages are private by default. Leave both blank only if you deliberately
-  made the package public.
-- `CLOUDFLARE_TUNNEL_TOKEN` - leave blank for now (see below)
-
-Then:
-
-```bash
-./bootstrap.sh
-```
-
-It installs Docker if missing, logs in to GHCR, installs and enables the systemd
-timers, and runs the first deploy. It is safe to re-run.
-
-If it just installed Docker, log out and back in before re-running, so your user
-picks up the `docker` group.
-
-The first deploy pulls roughly 180MB and then starts a JVM from an SD card, so
-give it a few minutes before assuming something has gone wrong.
-
-## Reaching it
-
-**Without a domain (default).** `cloudflared` opens a *quick tunnel* and prints
-a URL like `https://random-words-1234.trycloudflare.com`. `deploy.sh` writes it
-to `infra/pi/tunnel-url.txt`:
-
-```bash
-cat ~/vksiv-apps/infra/pi/tunnel-url.txt
-```
-
-This URL **changes every time the tunnel container restarts** - including on
-every deploy. That is the free tier's limitation, not a misconfiguration.
-
-**With a domain on Cloudflare (recommended).** Create a named tunnel in
-Zero Trust -> Networks -> Tunnels, point a hostname such as `qa.example.com` at
-`http://api:8080`, and put the tunnel token in `.env` as
-`CLOUDFLARE_TUNNEL_TOKEN`. `deploy.sh` detects it and switches profiles
-automatically - the URL then never changes. A domain costs roughly $10/year and
-is the single best improvement you can make to this environment.
-
-You can also put Cloudflare Access in front of the hostname so only your own
-Google or GitHub account can load QA.
-
-**Not wanting anything public at all.** Install Tailscale on the Pi instead and
-skip cloudflared entirely; QA is then reachable only from your own devices.
+**Private only.** Install Tailscale and skip cloudflared entirely; QA is then
+reachable only from your own devices.
 
 ## Day-to-day
 
@@ -183,12 +232,8 @@ journalctl -u vksiv-deploy.service -f
 ```
 
 ```bash
-systemctl list-timers 'vksiv-*'
+./deploy.sh
 ```
-
-`vcgencmd get_throttled` should return `0x0`. Anything else means the Pi has
-been throttled by heat or an inadequate power supply, which on a Pi 4 is the
-most common cause of unexplained slowness or corruption.
 
 ## Backups
 
@@ -204,3 +249,25 @@ gunzip -c backups/appdb-20260101-033000.sql.gz | docker compose exec -T db psql 
 These backups live on the same card as the database, which is exactly the thing
 expected to fail. Copy them off the Pi periodically - a cron job doing `scp` to
 your laptop is enough.
+
+## Why the microSD needs care
+
+A database writes constantly and SD cards wear out by being written to. Expect a
+consumer card running Postgres to degrade over months rather than years.
+
+Two mitigations are already configured for you:
+
+- **Postgres is tuned to write less.** `infra/pi/docker-compose.yml` sets
+  `synchronous_commit=off`, `wal_compression=on` and a 15-minute checkpoint
+  interval. The first is the significant one - commits stop waiting on fsync.
+  A crash can lose the last fraction of a second of transactions, which is the
+  right trade for QA and would be the wrong one for production.
+- **Docker log rotation is capped** at 10MB x 3 per container, so logs cannot
+  quietly grind the card down.
+
+Steps 3 and 5 above cover the rest: no swap, a capped journal, and nightly
+backups you copy off the box.
+
+If this becomes a nuisance, the real fix is a SATA SSD in a USB 3.0 enclosure on
+one of the blue ports. A Pi 4 can boot from it directly with current firmware,
+and it is a large improvement over any card.
