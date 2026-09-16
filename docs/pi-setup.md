@@ -94,6 +94,22 @@ Act on what it prints:
 sudo swapoff -a && sudo systemctl disable --now dphys-swapfile
 ```
 
+Confirm the kernel's memory cgroup is enabled. This matters more than it looks:
+the container memory limits this environment depends on are **silently ignored**
+without it, and the JVM goes back to sizing its heap against the host's full
+4GB. This should print `OK`:
+
+```bash
+grep -qw memory /sys/fs/cgroup/cgroup.controllers && echo OK || echo MISSING
+```
+
+If it prints `MISSING`, enable it and reboot. `cmdline.txt` must stay a single
+line, which is why this appends rather than adding one:
+
+```bash
+sudo sed -i '1 s/$/ cgroup_memory=1 cgroup_enable=memory/' /boot/firmware/cmdline.txt && sudo reboot
+```
+
 Cap the systemd journal so it cannot grow without bound:
 
 ```bash
