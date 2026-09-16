@@ -26,7 +26,8 @@ if ! command -v docker >/dev/null 2>&1; then
     say "Installing Docker"
     curl -fsSL https://get.docker.com | sudo sh
     sudo usermod -aG docker "$APP_USER"
-    echo "Added $APP_USER to the docker group. Log out and back in before continuing."
+    echo "Added $APP_USER to the docker group. This shell cannot use Docker until"
+    echo "you log out and back in; the script will stop and tell you when it gets there."
 else
     say "Docker already installed: $(docker --version)"
 fi
@@ -56,6 +57,34 @@ for required in IMAGE POSTGRES_PASSWORD APP_JWT_SECRET; do
         exit 1
     fi
 done
+
+# --------------------------------------------------------- docker access -----
+# Group membership is only granted at login, so the shell that installed Docker
+# still cannot reach the socket. Stop here with instructions rather than pushing
+# on into a deploy that is guaranteed to fail with "permission denied".
+if ! docker info >/dev/null 2>&1; then
+    cat >&2 <<MSG
+
+Docker is installed, but this shell cannot reach it yet.
+
+  '$APP_USER' is in the 'docker' group, but group membership only applies to a
+  new login session. Log out and back in, then run this script again:
+
+      exit
+      # ssh back in, then:
+      cd "$HERE" && ./bootstrap.sh
+
+  Or, to stay in this session:
+
+      newgrp docker
+      cd "$HERE" && ./bootstrap.sh
+
+  Everything so far is already done and the re-run is idempotent, so it will
+  pick up from here quickly.
+
+MSG
+    exit 1
+fi
 
 # ------------------------------------------------------------------ GHCR -----
 # GHCR packages are private by default. A read-only PAT keeps the image private
